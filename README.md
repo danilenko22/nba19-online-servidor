@@ -1,51 +1,53 @@
-# NBA LIVE 19 online – servidor propio para shadPS4
+# NBA LIVE 19 online – community server for shadPS4
 
-Servidor que reemplaza a los servidores de EA (cerrados) de **NBA LIVE 19** (PS4, CUSA11355 v1.00) para jugar el **partido clasificado 1 contra 1** online con el emulador [shadPS4](https://github.com/danilenko22/shadPS4/tree/nba19-fix) (rama `nba19-fix`, que trae los cambios que necesita el cliente).
+A server that replaces EA's (shut down) servers for **NBA LIVE 19** (PS4, CUSA11355 v1.00) so the **ranked 1 vs 1 match** can be played online with the [shadPS4](https://github.com/danilenko22/shadPS4/tree/nba19-fix) emulator (branch `nba19-fix`, which has the client-side changes).
 
-Probado entre dos PCs (Intel y AMD): previa, carga y partido completo sincronizados.
+Tested between two PCs (Intel and AMD): pre-game, loading and full matches stay in sync.
 
-## Qué hace
+**Ready-to-use package (client + server):** see [Releases](https://github.com/danilenko22/nba19-online-servidor/releases).
 
-| Módulo | Función |
+## What it does
+
+| Module | Role |
 |---|---|
-| `servidor.py` | Arranque; redirector HTTPS (42230), Nucleus/OAuth falso (443), QoS (17502 TCP/UDP), servicios web (8088), proxy WebAPI de ShadNet (31315), telemetría y ticker (9988, 8999). |
-| `blaze.py`, `tdf.py`, `nba.py` | Protocolo Blaze de EA (TDF «Heat2») en el puerto 10041: login, configuración y componentes que pide el juego. |
-| `gamemanager.py` | Emparejamiento y partidas con **topología de servidor dedicado** (el servidor es el anfitrión de la partida). |
-| `juego.py` | **Servidor de juego** (UDP 7000): CommUDP, sincronía de NetGameLink, rebroadcaster de los streams de la previa y lado servidor de **NetGameDist** (reparte las entradas de cada fotograma y alinea el inicio del partido). |
+| `servidor.py` | Entry point; HTTPS redirector (42230), fake Nucleus/OAuth (443), QoS (17502 TCP/UDP), web services (8088), ShadNet WebAPI proxy (31315), telemetry and ticker (9988, 8999). |
+| `blaze.py`, `tdf.py`, `nba.py` | EA's Blaze protocol (TDF "Heat2") on port 10041: login, configuration and the components the game asks for. |
+| `gamemanager.py` | Matchmaking and games with a **dedicated server topology** (the server hosts the game). |
+| `juego.py` | **Match server** (UDP 7000): CommUDP, NetGameLink sync, rebroadcaster for the pre-game streams, and the server side of **NetGameDist** (distributes each frame's inputs and aligns the start of the match). |
 
-## Uso
+## Usage
 
-Requiere Python 3.10+ y `openssl` en el PATH (o los `redirector.crt`/`.key` del paquete publicado; shadPS4 no verifica el certificado).
+Requires Python 3.10+ and `openssl` in the PATH (or the `redirector.crt`/`.key` from the released package; shadPS4 does not verify the certificate).
 
 ```
 python -u servidor.py <IP>
 ```
 
-`<IP>` es la IP con la que los jugadores llegan al servidor (la de una VPN de juego, la pública con los puertos abiertos o la local). En Windows: editar y abrir `Iniciar_servidor.bat`.
+`<IP>` is the IP the players use to reach the server (a gaming VPN IP, the public IP with forwarded ports, or the local IP). On Windows: edit and run `Start_server.bat`.
 
-Puertos: TCP 42230, 10041, 443, 8088, 31315, 9988, 8999, 17502 · UDP 17502, 7000.
+Ports: TCP 42230, 10041, 443, 8088, 31315, 9988, 8999, 17502 · UDP 17502, 7000.
 
-Cada jugador usa el shadPS4 de la rama `nba19-fix` con:
-- `user/hosts.txt` que mande `*.ea.com` y `srv.shadps4.net` a la IP del servidor;
-- `NBA_GSRV=10.99.0.1:1899=<IP>:7000` (el servidor de juego se anuncia con una IP virtual);
-- el parche `NBA19_online.xml` y la configuración del juego con red y ShadNet activados.
+Each player uses the shadPS4 build from branch `nba19-fix` with:
+- `user/hosts.txt` sending `*.ea.com` and `srv.shadps4.net` to the server IP;
+- `NBA_GSRV=10.99.0.1:1899=<IP>:7000` (the match server is announced with a virtual IP);
+- the `NBA19_online.xml` patch and the game config with network and ShadNet enabled.
 
-El paquete publicado trae todo eso listo (carpeta `Cliente`).
+The released package has all of that ready (`Client` folder).
 
-## Variables de entorno (depuración)
+## Environment variables (debugging)
 
-| Variable | Efecto |
+| Variable | Effect |
 |---|---|
-| `NBA_DEDICADO=0` | Topología P2P antigua (no sirve para jugar; solo para investigar). |
-| `NBA_RIVAL_FALSO=1` | Empareja al momento con un rival inventado para probar con una sola PC. |
-| `NBA_PUERTO_JUEGO` | Puerto UDP del servidor de juego (7000). |
+| `NBA_DEDICADO=0` | Old P2P topology (not playable; research only). |
+| `NBA_RIVAL_FALSO=1` | Matches you instantly with a fake opponent, to test with a single PC. |
+| `NBA_PUERTO_JUEGO` | UDP port of the match server (7000). |
 
-Los registros quedan en `logs/`.
+Logs are written to `logs/`.
 
-## Aviso
+## Disclaimer
 
-Proyecto no oficial, sin relación con EA ni con el equipo de shadPS4. No incluye el juego ni archivos de la PS4.
+Unofficial project, not affiliated with EA or the shadPS4 team. The game and PS4 files are not included.
 
-## Licencia
+## License
 
-GPL-2.0 (ver `LICENSE`), la misma que shadPS4.
+GPL-2.0 (see `LICENSE`), the same as shadPS4.

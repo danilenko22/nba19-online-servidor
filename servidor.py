@@ -336,10 +336,10 @@ def asegurar_certificado():
         subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "3650",
                         "-subj", "/CN=*.ea.com", "-keyout", key, "-out", crt],
                        check=True, capture_output=True)
-        log("certificado autofirmado generado (redirector.crt / redirector.key)")
+        log("self-signed certificate generated (redirector.crt / redirector.key)")
     except (OSError, subprocess.CalledProcessError) as e:
-        sys.exit(f"Falta redirector.crt/redirector.key y no se pudo generar con openssl ({e}). "
-                 "Usa los del paquete publicado o instala OpenSSL.")
+        sys.exit(f"redirector.crt/redirector.key are missing and could not be generated with openssl ({e}). "
+                 "Use the ones from the released package or install OpenSSL.")
 
 
 if __name__ == "__main__":
