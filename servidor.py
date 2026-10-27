@@ -23,12 +23,49 @@ from urllib.parse import parse_qs, urlsplit
 
 import blaze
 import juego
+import rutas
 
-AQUI = os.path.dirname(os.path.abspath(__file__))
+AQUI = rutas.BASE
 LOGS = os.path.join(AQUI, "logs")
 os.makedirs(LOGS, exist_ok=True)
 
-IP = sys.argv[1] if len(sys.argv) > 1 else "127.0.0.1"
+def obtener_ip():
+    """IP que se anuncia a los jugadores: argumento de la linea de comandos o, si no hay, la guardada en
+    server_ip.txt; si tampoco existe, se pregunta (con las IPs de esta PC como ayuda) y se guarda."""
+    if len(sys.argv) > 1:
+        return sys.argv[1]
+    fichero = os.path.join(AQUI, "server_ip.txt")
+    try:
+        guardada = open(fichero, encoding="ascii").read().strip()
+        if guardada:
+            print(f"Server IP: {guardada}  (to change it, edit or delete server_ip.txt)")
+            return guardada
+    except OSError:
+        pass
+    try:
+        propias = sorted({a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)})
+    except OSError:
+        propias = []
+    print("NBA LIVE 19 online server - first run")
+    print("Enter the IP the players will use to reach this PC:")
+    print("  - your VPN IP (Radmin VPN, ZeroTier, Tailscale...), or")
+    print("  - your public IP if you forwarded the ports on your router, or")
+    print("  - your local IP if everyone is on the same home network.")
+    if propias:
+        print("IPs of this PC: " + ", ".join(propias))
+    while True:
+        ip = input("Server IP: ").strip()
+        try:
+            socket.inet_aton(ip)
+        except OSError:
+            print("That is not a valid IPv4 address (example: 26.123.45.67).")
+            continue
+        with open(fichero, "w", encoding="ascii") as f:
+            f.write(ip + "\n")
+        return ip
+
+
+IP = obtener_ip()
 PUERTO_REDIRECTOR = 42230
 PUERTO_BLAZE = 10041
 PUERTO_QOS = 17502
@@ -342,8 +379,25 @@ def asegurar_certificado():
                  "Use the ones from the released package or install OpenSSL.")
 
 
-if __name__ == "__main__":
+def comprobar_puertos_libres():
+    """En Windows los servidores TCP se pueden abrir dos veces (SO_REUSEADDR); los UDP no. Si el puerto UDP
+    del servidor de juego o el de QoS ya esta ocupado, casi seguro que el servidor ya esta abierto."""
+    for puerto in (juego.PUERTO, PUERTO_QOS):
+        prueba = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            prueba.bind(("0.0.0.0", puerto))
+        except OSError:
+            raise SystemExit(f"UDP port {puerto} is already in use: is the server (or another program) "
+                             "already running?") from None
+        finally:
+            prueba.close()
+
+
+def main():
+    comprobar_puertos_libres()
     asegurar_certificado()
+    print(f"NBA LIVE 19 server running on {IP}. Keep this window open while people play; "
+          "close it to stop the server. Logs: logs\\servidor.log", flush=True)
     threading.Thread(target=servir_registro_tcp, args=(9988, "telemetria"), daemon=True).start()
     threading.Thread(target=servir_registro_tcp, args=(8999, "ticker"), daemon=True).start()
     threading.Thread(target=blaze.servir, args=(IP, PUERTO_BLAZE, log, lambda: _ultimo_nombre[0]),
@@ -358,3 +412,17 @@ if __name__ == "__main__":
     threading.Thread(target=webapi.serve_forever, daemon=True).start()
     log(f"proxy WebAPI (ShadNet) escuchando en :{PUERTO_WEBAPI}")
     servir_https(PUERTO_REDIRECTOR, Redirector, "redirector")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except BaseException as e:  # en el .exe la ventana se cerraria sin dejar leer el error
+        print(f"\nERROR: {e}")
+        if isinstance(e, OSError) and getattr(e, "winerror", None) == 10048:
+            print("A port is already in use: is the server (or another program) already running?")
+        if getattr(sys, "frozen", False):
+            input("Press Enter to close...")
+        raise SystemExit(1)

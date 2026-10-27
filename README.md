@@ -17,13 +17,17 @@ Tested between two PCs (Intel and AMD): pre-game, loading and full matches stay 
 
 ## Usage
 
-Requires Python 3.10+ and `openssl` in the PATH (or the `redirector.crt`/`.key` from the released package; shadPS4 does not verify the certificate).
+**Easiest:** download the [release](https://github.com/danilenko22/nba19-online-servidor/releases) and double-click `Server\NBA19_Server.exe` (no Python needed). The first time it asks for the server IP and saves it in `server_ip.txt`.
+
+**From source:** Python 3.10+, no extra packages.
 
 ```
-python -u servidor.py <IP>
+python -u servidor.py [IP]
 ```
 
-`<IP>` is the IP the players use to reach the server (a gaming VPN IP, the public IP with forwarded ports, or the local IP). On Windows: edit and run `Start_server.bat`.
+`IP` is the IP the players use to reach the server (a gaming VPN IP, the public IP with forwarded ports, or the local IP). Without it, the server asks for it and saves it in `server_ip.txt`. The TLS certificate (`redirector.crt`/`.key`) is generated with `openssl` if missing; any certificate works, shadPS4 does not verify it.
+
+**Building the exe:** `pip install pyinstaller`, then run `build_exe.bat` (output in `dist\`).
 
 Ports: TCP 42230, 10041, 443, 8088, 31315, 9988, 8999, 17502 · UDP 17502, 7000.
 

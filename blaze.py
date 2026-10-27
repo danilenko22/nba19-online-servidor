@@ -18,6 +18,7 @@ import time
 import gamemanager
 import nba
 import tdf
+import rutas
 
 HDR_LEN = 16
 MSG_REQUEST, MSG_REPLY, MSG_NOTIFY, MSG_ERROR, MSG_PING, MSG_PING_REPLY = range(6)
@@ -84,7 +85,7 @@ PERSONA_NAMESPACE = "ps4"
 PLATAFORMA_PS4 = 4   # Blaze::ClientPlatformType del juego (PTFM en getEmailOptInSettings); CPFT=20 del preAuth es otro enum
 QOS_PORT = 17502
 PUERTO_WEB = 8088   # servicios web de NBA (HDL, rewards...): de momento solo se registran
-AJUSTES = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ajustes_usuario.json")
+AJUSTES = os.path.join(rutas.BASE, "ajustes_usuario.json")
 
 
 def nombre(component, command):

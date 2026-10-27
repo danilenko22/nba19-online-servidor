@@ -35,9 +35,10 @@ import socket
 import struct
 import threading
 import time
+import rutas
 
 PUERTO = int(os.environ.get("NBA_PUERTO_JUEGO", "7000"))
-CAPTURA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "juego_udp.txt")
+CAPTURA = os.path.join(rutas.BASE, "logs", "juego_udp.txt")
 ID_SERVIDOR = 0x7FFF0001
 SIN_ACK = 0x00FFFFFF
 KEEPALIVE = 0.25                 # s entre paquetes vacios hacia cada consola conectada
@@ -46,7 +47,7 @@ REENVIO = 0.3                    # s sin ACK -> se reenvia el paquete fiable mas
 RIVAL_FALSO = os.environ.get("NBA_RIVAL_FALSO") == "1"
 NOMBRE_RIVAL_FALSO = "rival_ficticio"     # = _SesionFalsa.nombre de gamemanager.py
 TEAM_RIVAL_FALSO = os.environ.get("NBA_TEAM_RIVAL", "27")
-RIVAL_ENTRADA = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "rival_entrada.txt")
+RIVAL_ENTRADA = os.path.join(rutas.BASE, "logs", "rival_entrada.txt")
 TIPO_STREAM = 0x0b
 # NetGameDist (recepcion del cliente en NetGameDistUpdate 0xd6d1d80, tabla de tipos 0xe4b00f8; envio
 # _NetGameDistSendInput 0xd6d2ce0; decodificacion de multi en 0xd6d2440)
