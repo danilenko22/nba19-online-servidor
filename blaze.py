@@ -510,6 +510,8 @@ class Sesion:
         fn = tabla.get((h["component"], h["command"]))
         if fn is None and h["component"] == gamemanager.GAME_MANAGER:
             r = gamemanager.manejar(self, h["command"], f)
+            if isinstance(r, int):                                   # codigo de error Blaze
+                return [frame_error(h, r)], True
             campos, notifs = r if isinstance(r, tuple) else (r, [])
             return [self.reply(h, campos)] + [self.notify(c, n, x) for c, n, x in notifs], True
         if fn is None and (h["component"], h["command"]) == (gamemanager.MESSAGING, 0x0001):

@@ -31,7 +31,9 @@ START_MATCHMAKING, CANCEL_MATCHMAKING, FINALIZE_GAME_CREATION = 0x0D, 0x0E, 0x0F
 # Live Run busca con escenarios (StartMatchmakingScenarioRequest: CMGD, PLJD, SCNA, SCNM); 0x11 supuesto.
 START_MATCHMAKING_SCENARIO, CANCEL_MATCHMAKING_SCENARIO = 0x10, 0x11
 MESH_CONNECTED, MESH_DISCONNECTED, MESH_LOST = 0x41, 0x42, 0x43
-CHANGE_GAME_TEAM_ID, SWAP_PLAYERS = 0x6D, 0x70      # tabla de comandos 0xd1fffe0 (id - 1)
+CHANGE_GAME_TEAM_ID, SWAP_PLAYERS = 0x6D, 0x70
+ERR_TEAM_NOT_ALLOWED = 0x00FD0004          # GAMEMANAGER_ERR_TEAM_NOT_ALLOWED
+RECHAZAR_EQUIPO_SIN_HUMANOS = os.environ.get("NBA_SIN_COOP") == "1"   # ver SWAP_PLAYERS      # tabla de comandos 0xd1fffe0 (id - 1)
 
 # notificaciones (tabla del eboot + 3)
 N_MATCHMAKING_FAILED = 0x0A
@@ -209,6 +211,15 @@ def _rol(j):
     return campo(campo(j["peticion"], "PLJD", []), "DFRL", "") or ""
 
 
+def _deja_equipo_sin_humanos(p, cambios):
+    """True si, aplicando cambios {PID: TIDX}, algun equipo de la sala se queda sin humanos (con 2 o mas en ella)."""
+    js = p["jugadores"]
+    if len(js) < 2:
+        return False
+    equipos = [cambios.get(j["uid"], _equipo(p, j, i)) for i, j in enumerate(js)]
+    return 0 not in equipos or 1 not in equipos
+
+
 def _rol_en_sala(p, j):
     """Rol de Blaze del jugador en la sala de Live Run. Los roles "0".."2" son los puestos de la alineacion (la sala
     pinta a cada humano en el puesto de su rol; traza 01:18). Al entrar el jugador no tiene puesto
@@ -227,7 +238,9 @@ def _roles_partida(p):
     # y sin el en el mapa el SDK del cliente lo rechaza con ROLE_NOT_ALLOWED (traza 01:03, marcas d23f4f0/d23f676)
     por_equipo = max(1, p["cap"] // 2)
     # puestos de la alineacion "0".."n-1" (1 jugador por equipo cada uno) + los genericos (rol pedido al entrar)
-    capacidades = {str(k): 1 for k in range(por_equipo)}
+    # puestos "0".."9": con 3 jugadores el admin pidio para el 3.º un puesto fuera de 0..2 (ROLE_NOT_ALLOWED, log
+    # de los betatesters 20:11) -> la alineacion del juego tiene mas puestos que los del 3v3; se declaran todos
+    capacidades = {str(k): 1 for k in range(10)}
     for r in ({_rol(j) for j in p["jugadores"]} | {"ANY_PLAYER_ROLE", ""}):
         capacidades.setdefault(r, por_equipo)
     crit = [(r, [("CRIT", M, (S, S, [])), ("RCAP", V, capacidades[r])])
@@ -453,6 +466,14 @@ def manejar(s, cmd, f):
     if cmd == SWAP_PLAYERS:
         # cambio de equipo de la sala de Live Run (TeamSwitchingManager del admin): SwapPlayersRequest
         # {GID, LGAM: [SwapPlayerData {PID, ROLE, SLOT, TIDX}]} -> NotifyGamePlayerTeamRoleSlotChange a todos
+        cambios = {campo(d, "PID", 0): campo(d, "TIDX", 0) for d in (campo(f, "LGAM") or (ST, []))[1]}
+        automatico = p.get("cambio_en_curso") is not None and p["cambio_en_curso"]["uid"] in cambios
+        if RECHAZAR_EQUIPO_SIN_HUMANOS and p["escenario"] and not automatico and _deja_equipo_sin_humanos(p, cambios):
+            # Desactivado: el corte de la prueba de las 23:15 (dos humanos en el mismo equipo) no era por el equipo
+            # sin humanos sino por inactividad (Live Run expulsa al jugador quieto a los ~90 s; confirmado 23:51).
+            # Se deja la comprobacion por si hiciera falta (NBA_SIN_COOP=1).
+            s.log(f"GameManager: cambio de equipo rechazado (dejaria un equipo sin humanos): {cambios}")
+            return ERR_TEAM_NOT_ALLOWED
         avisos = []
         for d in (campo(f, "LGAM") or (ST, []))[1]:
             pid, tidx = campo(d, "PID", 0), campo(d, "TIDX", 0)
