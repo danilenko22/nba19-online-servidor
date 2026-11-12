@@ -528,7 +528,10 @@ def _sala_abierta(yo):
     """Partida del mismo escenario con sitio libre (Live Run: salas de hasta PLAYER_CAPACITY)."""
     with _lock:
         for p in _partidas.values():
+            # solo salas que no empezaron: un jugador metido en un partido en curso quedaba de espectador y
+            # al salir se colgaba el juego (log de los betatesters, v2.2: entrada con estado 131 = IN_GAME)
             if (p["escenario"] == yo["escenario"] and len(p["jugadores"]) < p["cap"]
+                    and p["estado"] != IN_GAME and not p.get("cerrada")
                     and all(j["sesion"] is not yo["sesion"] for j in p["jugadores"])):
                 return p
     return None
@@ -653,15 +656,27 @@ def _aviso_puesto(p, j):
 def _avisar_puestos(p, r, jugadores):
     """Sala de Live Run: el jugador creado de cada humano solo aparece tras un cambio de equipo hecho por el flujo
     del admin (TeamSwitchingManager: requestSwap -> switchStart -> swapPlayers -> syncQueue -> switchEnd). El
-    servidor manda un requestSwap en nombre de cada jugador que entra (lo mismo que «Unirse al equipo ...»), DE UNO EN
-    UNO: con 4 jugadores varios cambios a la vez se cruzaban en el admin."""
-    cola = p.setdefault("cambios_pend", [])
+    servidor manda un requestSwap en nombre de cada jugador (lo mismo que «Unirse al equipo ...»), de uno en uno.
+    Se manda cuando la consola del jugador ya esta en la sala (su mensaje timerGo, tras OtpSession
+    JoinSessionCompleted): mandado antes, el admin lo ignoraba (log v2.2, 12:27). Si no llega timerGo, a los 8 s."""
     for j in jugadores:
-        if not j.get("cambio_inicial"):
-            j["cambio_inicial"] = True
-            cola.append(j)
-    if not p.get("cambio_en_curso"):
-        t = threading.Timer(3.0, _siguiente_cambio, (p,))
+        if not j.get("cambio_programado"):
+            j["cambio_programado"] = True
+            t = threading.Timer(8.0, _encolar_cambio, (p, j))
+            t.daemon = True
+            t.start()
+
+
+def _encolar_cambio(p, j):
+    with _lock:
+        if j.get("cambio_inicial") or "equipo" in j or j not in p["jugadores"]:
+            return
+        j["cambio_inicial"] = True
+        j.setdefault("intentos_cambio", 0)
+        p.setdefault("cambios_pend", []).append(j)
+        libre = not p.get("cambio_en_curso")
+    if libre:
+        t = threading.Timer(0.5, _siguiente_cambio, (p,))
         t.daemon = True
         t.start()
 
@@ -683,10 +698,15 @@ def _siguiente_cambio(p):
                                     f"(para que la sala muestre su jugador)")
     _a_todos(p, [_aviso_mensaje(j, attr, OBJ_GAME, [p["gid"]])])
 
-    def vencido():                                   # sin swapPlayers en 4 s: se sigue con el siguiente
-        if p.get("cambio_en_curso") is j:
+    def vencido():                                   # sin swapPlayers en 4 s: reintento (2 veces) y el siguiente
+        with _lock:
+            if p.get("cambio_en_curso") is not j:
+                return
             p["cambio_en_curso"] = None
-            _siguiente_cambio(p)
+            j["intentos_cambio"] = j.get("intentos_cambio", 0) + 1
+            if j["intentos_cambio"] <= 2 and "equipo" not in j and j in p["jugadores"]:
+                p.setdefault("cambios_pend", []).append(j)
+        _siguiente_cambio(p)
     t = threading.Timer(4.0, vencido)
     t.daemon = True
     t.start()
@@ -846,6 +866,12 @@ def mensaje(s, f):
                       ("NASP", S, "ps4")]),
     ])
     atr = dict((campo(f, "ATTR") or (V, S, []))[2])
+    if atr.get(7170404) == "timerGo" and yo is not None:
+        for p in list(_partidas.values()):
+            if p["escenario"] and yo in p["jugadores"] and not yo.get("cambio_inicial"):
+                t = threading.Timer(0.5, _encolar_cambio, (p, yo))
+                t.daemon = True
+                t.start()
     s.log(f"Messaging: {nombre} -> {ttyp} {tids}: {atr.get(7170404, '?')} "
           f"({len(destinos) if destinos is not None else 1} destinos)")
     respuesta = [("MGID", V, mgid), ("MIDS", L, (V, [mgid]))]
