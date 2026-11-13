@@ -30,7 +30,9 @@ JOIN_GAME, REMOVE_PLAYER = 0x09, 0x0B
 START_MATCHMAKING, CANCEL_MATCHMAKING, FINALIZE_GAME_CREATION = 0x0D, 0x0E, 0x0F
 # Live Run busca con escenarios (StartMatchmakingScenarioRequest: CMGD, PLJD, SCNA, SCNM); 0x11 supuesto.
 START_MATCHMAKING_SCENARIO, CANCEL_MATCHMAKING_SCENARIO = 0x10, 0x11
+LEAVE_GAME_BY_GROUP = 0x16
 MESH_CONNECTED, MESH_DISCONNECTED, MESH_LOST = 0x41, 0x42, 0x43
+REAS_CONN_LOST = 1                       # PlayerRemovedReason: conexion perdida (el cliente manda 8 al salir)
 CHANGE_GAME_TEAM_ID, SWAP_PLAYERS = 0x6D, 0x70
 ERR_TEAM_NOT_ALLOWED = 0x00FD0004          # GAMEMANAGER_ERR_TEAM_NOT_ALLOWED
 RECHAZAR_EQUIPO_SIN_HUMANOS = os.environ.get("NBA_SIN_COOP") == "1"   # ver SWAP_PLAYERS      # tabla de comandos 0xd1fffe0 (id - 1)
@@ -347,7 +349,8 @@ def manejar(s, cmd, f):
     """Devuelve campos de respuesta (lista), o (campos, notificaciones_para_mi)."""
     if cmd in (START_MATCHMAKING, START_MATCHMAKING_SCENARIO):
         while (vieja := _partida_de(s)) is not None:     # partida anterior que el cliente no cerro
-            _terminar(vieja, next((j for j in vieja["jugadores"] if j["sesion"] is s), None), cmd)
+            _sacar(vieja, next((j for j in vieja["jugadores"] if j["sesion"] is s), None), cmd)
+        _quitar_sesiones_viejas(s)
         msid = next(_ids)
         yo = _info_jugador(s, msid, f)
         if yo["escenario"]:
@@ -387,7 +390,7 @@ def manejar(s, cmd, f):
         s.log(f"GameManager: emparejamiento cancelado ({antes - len(_cola)} en cola)")
         p = _partida_de(s)                   # partida que el cliente no llego a aceptar
         if p is not None:
-            _terminar(p, next((j for j in p["jugadores"] if j["sesion"] is s), None), cmd)
+            _sacar(p, next((j for j in p["jugadores"] if j["sesion"] is s), None), cmd)
         # NotifyMatchmakingFailed (TDF NotifyMatchmakingFinished): sin ella el cliente sigue esperando
         msid_c = campo(f, "MSID", 0)
         fin = [("DURA", tdf.TIME, 0), ("MAXF", V, 100),
@@ -499,8 +502,11 @@ def manejar(s, cmd, f):
             # igualmente de que no llega al otro jugador (malla P2P/voz que no existe) -> no es un error
             s.log(f"GameManager: {yo['nombre'] if yo else '?'} sin conexion directa con {tcg[2]:#x} (ignorado)")
             return []
-    if cmd in (REMOVE_PLAYER, DESTROY_GAME, MESH_LOST):
+    if cmd == DESTROY_GAME:
         _terminar(p, yo, cmd)
+        return []
+    if cmd in (REMOVE_PLAYER, MESH_LOST, LEAVE_GAME_BY_GROUP):
+        _sacar(p, yo, cmd, campo(f, "REAS", 0) or 0)
         return []
     return []
 
@@ -804,15 +810,69 @@ def _probar_variantes(p, variantes, pausa=6.0):
         time.sleep(pausa)
 
 
-def _terminar(p, yo, motivo):
+def _terminar(p, yo, motivo, reas=0):
     with _lock:
-        _partidas.pop(p["gid"], None)
+        if _partidas.pop(p["gid"], None) is None:
+            return                           # ya cerrada (p. ej. salida + corte de la misma consola)
     p["jugadores"][0]["sesion"].log(f"GameManager: partida {p['gid']} cerrada (motivo {motivo if isinstance(motivo, str) else hex(motivo)}, "
                                     f"por {yo['nombre'] if yo else '?'})")
     uid = yo["uid"] if yo else 0
-    _a_todos(p, [(GAME_MANAGER, N_PLAYER_REMOVED, [("CNTX", V, 0), ("GID ", V, p["gid"]), ("LFPJ", V, 0),
-                                                   ("PID ", V, uid), ("REAS", V, 0)]),
-                 (GAME_MANAGER, N_GAME_REMOVED, [("GID ", V, p["gid"]), ("REAS", V, 0)])], excepto=yo)
+    quitado = (GAME_MANAGER, N_PLAYER_REMOVED, [("CNTX", V, 0), ("GID ", V, p["gid"]), ("LFPJ", V, 0),
+                                                ("PID ", V, uid), ("REAS", V, reas)])
+    _a_todos(p, [quitado, (GAME_MANAGER, N_GAME_REMOVED, [("GID ", V, p["gid"]), ("REAS", V, 0)])], excepto=yo)
+    if yo is not None and motivo != "desconexion" and p["escenario"]:
+        # el que sale tambien espera su NotifyPlayerRemoved: sin ella el juego se quedaba colgado al dejar
+        # una sala de Live Run en la que estaba solo (log del VPS 00:45, sala privada)
+        _avisar_al_que_sale(yo, [quitado], motivo)
+
+
+def _avisar_al_que_sale(yo, notifs, motivo):
+    """NotifyPlayerRemoved para el que sale. Si sale por un pedido suyo (leaveGameByGroup, removePlayer...),
+    va despues de la respuesta: mandada antes, el juego destruia la sala al recibirla, descartaba el pedido
+    pendiente y se quedaba en «Saliendo de la sala...» para siempre (traza del juego 00:47: onGameDestructing
+    sin nada despues; log del VPS 03:46:30, la notificacion salio antes de la respuesta a 0x16)."""
+    if isinstance(motivo, int):
+        threading.Timer(0.3, _enviar, (yo, notifs)).start()
+    else:
+        _enviar(yo, notifs)
+
+
+def _sacar(p, yo, motivo, reas=0):
+    """Un jugador deja la partida. En las salas de Live Run, si no es el anfitrion, solo sale el: antes
+    cualquier salida o corte cerraba la sala para todos (log del VPS 01:00: un invitado entro y salio de la
+    sala de otro y la sala se cerro; y un corte de un invitado echaba a todos del partido). Si es el
+    anfitrion (no hay migracion de anfitrion) o en 1 contra 1, se cierra la partida como antes."""
+    if yo is None:
+        return
+    if not p["escenario"] or yo is p["jugadores"][0] or len(p["jugadores"]) <= 1:
+        _terminar(p, yo, motivo, reas)
+        return
+    with _lock:
+        if yo not in p["jugadores"]:
+            return
+        p["jugadores"].remove(yo)
+        if p.get("cambio_en_curso") is yo:
+            p["cambio_en_curso"] = None
+    yo["sesion"].log(f"GameManager: {yo['nombre']} sale de la sala {p['gid']} "
+                     f"(motivo {motivo if isinstance(motivo, str) else hex(motivo)}); "
+                     f"quedan {len(p['jugadores'])}/{p['cap']}")
+    aviso = [(GAME_MANAGER, N_PLAYER_REMOVED, [("CNTX", V, 0), ("GID ", V, p["gid"]), ("LFPJ", V, 0),
+                                               ("PID ", V, yo["uid"]), ("REAS", V, reas)])]
+    _a_todos(p, aviso)
+    if motivo not in ("desconexion", "sesion duplicada"):
+        _avisar_al_que_sale(yo, aviso, motivo)   # el que sale tambien espera su NotifyPlayerRemoved
+    threading.Timer(0.5, _siguiente_cambio, (p,)).start()
+
+
+def _quitar_sesiones_viejas(s):
+    """El mismo usuario con otra conexion (la vieja quedo colgada tras cerrar el juego): se le saca de
+    su partida para que no figure dos veces en la sala ni la cierre al caerse (log del VPS 00:56)."""
+    with _lock:
+        viejas = [(p, j) for p in _partidas.values() for j in p["jugadores"]
+                  if j["uid"] == s.uid and j["sesion"] is not s]
+    for p, j in viejas:
+        s.log(f"GameManager: {j['nombre']} tenia otra sesion en la partida {p['gid']}: se descarta")
+        _sacar(p, j, "sesion duplicada", REAS_CONN_LOST)
 
 
 def desconectado(s):
@@ -821,7 +881,17 @@ def desconectado(s):
         _cola[:] = [x for x in _cola if x["sesion"] is not s]
     p = _partida_de(s)
     if p:
-        _terminar(p, next((j for j in p["jugadores"] if j["sesion"] is s), None), "desconexion")
+        _sacar(p, next((j for j in p["jugadores"] if j["sesion"] is s), None), "desconexion", REAS_CONN_LOST)
+
+
+def gid_de(uid):
+    """Para el servidor de juego (juego.py): id de la partida del jugador con BlazeId uid, o None. Sirve para
+    que cada consola solo intercambie datos con las de su misma partida."""
+    with _lock:
+        for p in _partidas.values():
+            if any(j["uid"] == uid for j in p["jugadores"]):
+                return p["gid"]
+    return None
 
 
 def puesto_dist(uid):
@@ -832,6 +902,12 @@ def puesto_dist(uid):
     with _lock:
         for p in _partidas.values():
             uids = [j["uid"] for j in p["jugadores"]]
+            if p.get("estado") == IN_GAME:
+                # orden fijo durante el partido: si sale un jugador del medio, los indices de NetGameDist de
+                # los demas no se corren (su hueco queda como "sin entrada"); con la lista viva se desfasaban
+                uids = p.setdefault("orden_dist", uids)
+            else:
+                p.pop("orden_dist", None)
             if uid in uids:
                 # huecos: 1 contra 1 = 3 (2 jugadores + 1). En las salas por escenario (Live Run) el NetGameDist
                 # del cliente tiene 11 (10 = maximo de Live Run 5v5, + 1) aunque la sala sea 3v3: con 3 o 7 el

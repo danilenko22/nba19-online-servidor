@@ -44,6 +44,9 @@ SIN_ACK = 0x00FFFFFF
 KEEPALIVE = 0.25                 # s entre paquetes vacios hacia cada consola conectada
 SINCRONIA = 1.0                  # s sin mandar sincronia -> se manda una (normalmente se contesta a la de la consola)
 REENVIO = 0.3                    # s sin ACK -> se reenvia el paquete fiable mas antiguo
+NAK_PAUSA = 0.08                 # s minimos entre NAK enviados / reenvios por NAK (no inundar)
+ESTANCADA = 2.0                 # s sin entradas de una consola (con las demas esperando) -> fuera del reparto
+ATRASO_MIN = 30                  # entradas pendientes de otra consola (~1 s) para considerar a una congelada
 RIVAL_FALSO = os.environ.get("NBA_RIVAL_FALSO") == "1"
 NOMBRE_RIVAL_FALSO = "rival_ficticio"     # = _SesionFalsa.nombre de gamemanager.py
 TEAM_RIVAL_FALSO = os.environ.get("NBA_TEAM_RIVAL", "27")
@@ -128,6 +131,13 @@ class Conexion:
         self.flujo_visto = False
         self.real = False            # ya manda entradas reales (dejo el marcador de 1 byte)
         self.descartadas = 0         # marcadores propios descartados para alinear fotogramas
+        self.ultima_entrada = 0.0    # cuando llego su ultima entrada de NetGameDist
+        self.fuera = False           # sacada del reparto por dejar de mandar entradas (juego congelado)
+        self.fuera_orden = {}        # numero -> datos llegados por delante de un paquete perdido
+        self.ultimo_nak_tx = 0.0
+        self.naks_tx = 0
+        self.naks_rx = 0
+        self.ultimo_reenvio_nak = 0.0
 
     def ack(self):
         return SIN_ACK if self.esperado == 0x100 and self.recibidos == 0 else _ant(self.esperado)
@@ -193,6 +203,26 @@ class Servidor:
             if num <= ack:
                 del c.pendientes[num]
 
+    def _nak_recibido(self, c, desde):
+        """NAK de la consola [00000004][u32 primer numero que le falta] (CommUDP del cliente 0xd6c7220: da
+        por confirmado lo anterior y reenvia desde el mas antiguo). Antes se ignoraba: la consola repetia el
+        NAK cientos de veces por segundo y, sin el paquete, su partido se quedaba esperando."""
+        for num in [n for n in c.pendientes if n < desde]:
+            del c.pendientes[num]
+        c.naks_rx += 1
+        ahora = time.monotonic()
+        if ahora - c.ultimo_reenvio_nak < NAK_PAUSA:
+            return                                  # ya se reenvio hace nada: no inundar
+        c.ultimo_reenvio_nak = ahora
+        reenviados = sorted(n for n in c.pendientes if n >= desde)
+        for num in reenviados:
+            self.enviar(c.origen, struct.pack(">II", num, c.ack()) + c.pendientes[num][8:])
+        if reenviados:
+            c.ultimo_reenvio = c.ultimo_tx = ahora
+        if c.naks_rx <= 3 or c.naks_rx % 100 == 0:
+            self.log(f"juego: {c.origen[0]}:{c.origen[1]} pide desde {desde:#x} (NAK #{c.naks_rx}): "
+                     f"{len(reenviados)} paquete(s) reenviado(s)")
+
     def _keepalive(self, c):
         self.enviar(c.origen, struct.pack(">II", c.sig_envio, c.ack()))
         c.ultimo_tx = time.monotonic()
@@ -217,6 +247,8 @@ class Servidor:
         elif tipo == DISC:
             self.log(f"juego: {texto} se desconecta (ident {ident:08x})")
             self.conexiones.pop(origen, None)
+        elif tipo == NAK and c is not None:
+            self._nak_recibido(c, ident)
         else:
             self.log(f"juego: {texto} control tipo {tipo} ident {ident:08x} cuerpo {cuerpo.hex()}")
 
@@ -227,11 +259,28 @@ class Servidor:
         cuerpo = datos[8 + (8 if meta else 0):]
         if not cuerpo:
             return                                  # keepalive/ACK de la consola
-        nuevos = 0
+        # Orden: lo que llega por delante de un hueco (paquete perdido) se guarda y se pide el que falta con
+        # un NAK; antes se descartaba y la consola, sin NAK, tardaba ~30 s en reenviar -> su juego se quedaba
+        # esperando la confirmacion y el partido se le «tildaba» (log del VPS 02:24, paquete 0xc64 perdido).
+        listos = []
         for n, sub in _subpaquetes(num, extra, cuerpo):
-            if n != c.esperado:
-                continue                            # repetido (ya entregado) o fuera de orden
-            c.esperado = _sig(c.esperado)
+            if n == c.esperado:
+                listos.append((n, sub))
+                c.esperado = _sig(c.esperado)
+                while c.esperado in c.fuera_orden:
+                    listos.append((c.esperado, c.fuera_orden.pop(c.esperado)))
+                    c.esperado = _sig(c.esperado)
+            elif 0 < (n - c.esperado) & 0xFFFFFF < 0x8000 and len(c.fuera_orden) < 1024:
+                c.fuera_orden.setdefault(n, sub)  # por delante de un hueco: se guarda
+        if c.fuera_orden and not listos and time.monotonic() - c.ultimo_nak_tx >= NAK_PAUSA:
+            c.ultimo_nak_tx = time.monotonic()
+            c.naks_tx += 1
+            self.enviar(c.origen, struct.pack(">II", NAK, c.esperado))
+            if c.naks_tx <= 3 or c.naks_tx % 100 == 0:
+                self.log(f"juego: {c.origen[0]}:{c.origen[1]} falta el paquete {c.esperado:#x} "
+                         f"({len(c.fuera_orden)} guardados por delante): NAK #{c.naks_tx}")
+        nuevos = 0
+        for n, sub in listos:
             c.recibidos += 1
             nuevos += 1
             if sub and sub[-1] & 0x40 and len(sub) >= 17:
@@ -264,7 +313,7 @@ class Servidor:
         clave = (c.origen, texto if texto is not None else cuerpo.hex())
         visto = self.vistos_stream.get(clave, 0) + 1
         self.vistos_stream[clave] = visto
-        otras = [o for o in self.conexiones.values() if o is not c and o.conectada]
+        otras = [o for o in self._grupo(c) if o is not c]
         if visto <= 2 or visto in (10, 100, 1000):
             subtipo = cuerpo[4:8].decode("latin1", "replace") if len(cuerpo) >= 8 else "?"
             self.log(f"juego: stream {subtipo} de {c.nombre or c.origen[0]}: {texto!r}"
@@ -300,24 +349,53 @@ class Servidor:
                 self.log(f"juego: dist {c.nombre or c.origen[0]}: flujo {cuerpo.hex()} -> se contesta igual")
             self._enviar_fiable(c, cuerpo + bytes([TIPO_FLUJO]))
             return
+        c.ultima_entrada = time.monotonic()
+        if c.fuera:
+            return                                   # ya no participa en el reparto de este partido
         c.entradas.append(cuerpo)
         c.entradas_rx += 1
         if not _es_marcador(cuerpo):
             c.real = True
         if c.entradas_rx <= 3 or c.entradas_rx in (10, 100, 1000, 10000):
             self.log(f"juego: dist {c.nombre or c.origen[0]}: entrada #{c.entradas_rx} {cuerpo.hex()}")
-        self._repartir()
+        self._repartir(c)
 
-    def _repartir(self):
+    def _grupo(self, c):
+        """Consolas conectadas de la misma partida que c. Antes se mezclaban TODAS las consolas del servidor:
+        con dos salas a la vez (o alguien en una sala de espera durante un partido) los fotogramas y mensajes
+        de una partida llegaban a la otra, y al irse una consola el partido ajeno se colgaba (log del VPS
+        00:45: una sala privada vacia tumbo el partido de otros dos jugadores)."""
+        import gamemanager
+        gid = gamemanager.gid_de(c.id_cliente)
+        return [o for o in self.conexiones.values()
+                if o.conectada and (o is c or gamemanager.gid_de(o.id_cliente) == gid)]
+
+    def _repartir(self, c):
         """Fotograma completo cuando todas las consolas tienen una entrada pendiente: a cada una se le manda
         un multi con las de las demas. Formato (decodificador 0xd6d2450; n = huecos de NetGameDist):
           [n de entradas propias que consume este fotograma = 1]
           [tipos: un nibble por cada OTRO jugador, bajo/alto alternando; 2/3 = entrada con datos, 1 = nada]
           [longitudes (1 byte) de los otros menos el ultimo, cuyo tamano es lo que queda]
           [entradas de los otros, en orden de indice]"""
-        conectadas = [o for o in self.conexiones.values() if o.conectada]
+        conectadas = [o for o in self._grupo(c) if not o.fuera]
+        # Consola congelada: si una deja de mandar entradas (ESTANCADA s) mientras otras ya acumulan al menos
+        # un segundo de entradas, se la saca del reparto y las demas siguen (su hueco va como "sin entrada").
+        # Antes el partido entero se paraba esperandola y a los ~9 s los demas juegos abandonaban (log del
+        # VPS 01:08 y 02:01: el juego de un jugador se congelaba y arrastraba a todos).
+        ahora = time.monotonic()
+        congeladas = [o for o in conectadas
+                      if o.entradas_rx and not o.entradas and ahora - o.ultima_entrada > ESTANCADA]
+        if congeladas and any(len(o.entradas) >= ATRASO_MIN for o in conectadas):
+            for o in congeladas:
+                o.fuera = True
+                self.log(f"juego: {o.nombre or o.origen[0]} no manda entradas hace "
+                         f"{ahora - o.ultima_entrada:.1f} s: se la saca del reparto, los demas siguen")
+            conectadas = [o for o in conectadas if not o.fuera]
         cons = [o for o in conectadas if o.entradas_rx]
-        if not cons or (not RIVAL_FALSO and (len(cons) < 2 or len(cons) < len(conectadas))):
+        # una consola sola solo recibe fotogramas si el partido ya estaba en marcha (los demas se fueron)
+        sola_en_partido = len(cons) == 1 and cons[0].real
+        if not cons or (not RIVAL_FALSO and ((len(cons) < 2 and not sola_en_partido)
+                                             or len(cons) < len(conectadas))):
             return                                   # se espera a que todas las consolas manden entradas
         import gamemanager
         while True:
@@ -401,7 +479,8 @@ class Servidor:
         c = self.conexiones.get(origen)
         if c is not None:
             c.ultimo_rx = time.monotonic()
-            self._ack_recibido(c, ack)
+            if (seq & 0xFFFFFF) >= 0x100:           # en los de control el campo no es un ACK (NAK: lo que falta)
+                self._ack_recibido(c, ack)
         if (seq & 0xFFFFFF) < 0x100:
             self._control(origen, seq & 0xFFFFFF, ack, datos[8:])
         elif c is not None and c.conectada:
